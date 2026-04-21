@@ -3,4 +3,6 @@ project(telemetry)
 
 add_library(telemetry SHARED telemetry.c)
 find_library(log-lib log)
-target_link_libraries(telemetry ${log-lib})
+
+# Добавили "dl" в конце
+target_link_libraries(telemetry ${log-lib} dl)
