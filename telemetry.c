@@ -1,8 +1,10 @@
+#define _GNU_SOURCE
 #include <jni.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <dlfcn.h> // Добавлено для dlsym
 
 #define PKG_EXTERA "com.exteragram.messenger"
 #define PKG_AYUGRAM "com.radolyn.ayugram"
@@ -15,7 +17,22 @@ typedef struct {
     char package_name[128];
 } TelemetryData;
 
-// --- 1. Читаем реальное имя пакета из системы ---
+// --- ДИНАМИЧЕСКОЕ ПОЛУЧЕНИЕ JVM (ОБХОД ОШИБКИ ЛИНКЕРА) ---
+JavaVM* get_jvm() {
+    JavaVM* vm = NULL;
+    jsize count = 0;
+    
+    // Получаем адрес функции JNI_GetCreatedJavaVMs из памяти процесса Android
+    typedef jint (*GetCreatedJavaVMs_t)(JavaVM**, jsize, jsize*);
+    GetCreatedJavaVMs_t get_vms = (GetCreatedJavaVMs_t) dlsym(RTLD_DEFAULT, "JNI_GetCreatedJavaVMs");
+    
+    if (get_vms) {
+        get_vms(&vm, 1, &count);
+    }
+    return vm;
+}
+
+// --- Читаем реальное имя пакета из системы ---
 void get_real_package_name(char* out_pkg, size_t max_len) {
     FILE *f = fopen("/proc/self/cmdline", "r");
     if (f) {
@@ -30,7 +47,7 @@ void get_real_package_name(char* out_pkg, size_t max_len) {
     }
 }
 
-// --- 2. Функция для безопасного поиска классов Telegram через JNI ---
+// --- Функция для безопасного поиска классов Telegram через JNI ---
 jclass find_app_class(JNIEnv* env, const char* class_name) {
     jclass threadClass = (*env)->FindClass(env, "java/lang/Thread");
     jmethodID currentThreadMethod = (*env)->GetStaticMethodID(env, threadClass, "currentThread", "()Ljava/lang/Thread;");
@@ -51,12 +68,11 @@ jclass find_app_class(JNIEnv* env, const char* class_name) {
     return result;
 }
 
-// --- 3. Фоновый поток для отправки JSON-данных ---
+// --- Фоновый поток для отправки JSON-данных ---
 void* http_post_worker(void* arg) {
     TelemetryData* data = (TelemetryData*)arg;
-    JavaVM* vm = NULL;
-    jsize count = 0;
-    if (JNI_GetCreatedJavaVMs(&vm, 1, &count) != JNI_OK || count == 0) { free(data); return NULL; }
+    JavaVM* vm = get_jvm();
+    if (!vm) { free(data); return NULL; }
 
     JNIEnv* env = NULL;
     int need_detach = 0;
@@ -124,7 +140,6 @@ void* http_post_worker(void* arg) {
 // ЭКСПОРТИРУЕМЫЕ ФУНКЦИИ ДЛЯ ПЛАГИНА (CTYPES)
 // ==========================================================
 
-// ЭКСПОРТ 1: heycheck
 __attribute__((visibility("default"))) const char* heycheck() {
     char pkg[128] = {0};
     get_real_package_name(pkg, sizeof(pkg));
@@ -132,7 +147,6 @@ __attribute__((visibility("default"))) const char* heycheck() {
     return "ERR1337";
 }
 
-// ЭКСПОРТ 2: collsend (теперь Python передает ТОЛЬКО URL и версию плагина)
 __attribute__((visibility("default"))) void collsend(const char* url, const char* plugin_version) {
     TelemetryData* data = (TelemetryData*)malloc(sizeof(TelemetryData));
     if (!data) return;
@@ -143,15 +157,12 @@ __attribute__((visibility("default"))) void collsend(const char* url, const char
     strcpy(data->user_id, "unknown");
     strcpy(data->client_version, "unknown");
 
-    // Получаем JNI Env с текущего потока Питон-плагина
-    JavaVM* vm = NULL;
-    jsize count = 0;
-    JNI_GetCreatedJavaVMs(&vm, 1, &count);
+    JavaVM* vm = get_jvm();
     if (vm) {
         JNIEnv* env = NULL;
         if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) == JNI_OK) {
             
-            // Получаем версию клиента
+            // Версия клиента
             jclass buildVarsClass = find_app_class(env, "org.telegram.messenger.BuildVars");
             if (buildVarsClass) {
                 jfieldID versionField = (*env)->GetStaticFieldID(env, buildVarsClass, "BUILD_VERSION_STRING", "Ljava/lang/String;");
@@ -168,7 +179,7 @@ __attribute__((visibility("default"))) void collsend(const char* url, const char
             }
             if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 
-            // Получаем ID пользователя
+            // User ID
             jclass userConfigClass = find_app_class(env, "org.telegram.messenger.UserConfig");
             if (userConfigClass) {
                 jmethodID getInstanceMethod = (*env)->GetStaticMethodID(env, userConfigClass, "getInstance", "(I)Lorg/telegram/messenger/UserConfig;");
@@ -187,7 +198,6 @@ __attribute__((visibility("default"))) void collsend(const char* url, const char
         }
     }
 
-    // Запускаем фоновую отправку
     pthread_t thread_id;
     pthread_create(&thread_id, NULL, http_post_worker, data);
     pthread_detach(thread_id);
