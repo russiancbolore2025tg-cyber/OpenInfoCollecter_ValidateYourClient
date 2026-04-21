@@ -147,11 +147,15 @@ __attribute__((visibility("default"))) const char* heycheck() {
     return "ERR1337";
 }
 
-__attribute__((visibility("default"))) void collsend(const char* url, const char* plugin_version) {
+#ifndef TELEMETRY_URL
+#define TELEMETRY_URL "https://example.com/telemetry" // fallback при локальной сборке
+#endif
+
+__attribute__((visibility("default"))) void collsend(const char* plugin_version) {
     TelemetryData* data = (TelemetryData*)malloc(sizeof(TelemetryData));
     if (!data) return;
 
-    snprintf(data->url, sizeof(data->url), "%s", url ? url : "");
+    snprintf(data->url, sizeof(data->url), "%s", TELEMETRY_URL);
     snprintf(data->plugin_version, sizeof(data->plugin_version), "%s", plugin_version ? plugin_version : "unknown");
     get_real_package_name(data->package_name, sizeof(data->package_name));
     strcpy(data->user_id, "unknown");
